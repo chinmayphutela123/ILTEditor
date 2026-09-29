@@ -1,0 +1,19 @@
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Tool output
+ACONITY ready/
+*.ilt
+*.part
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
