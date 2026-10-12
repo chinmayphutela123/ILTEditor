@@ -101,29 +101,35 @@ Aconity has accepted uses the `modelsection_param.txt` convention.
 | 5 | `$$UNITS` | `1.0000` | `1` | dialect |
 | 6 | `$$LABEL` in header | `$$LABEL/0,prt0` | removed | dialect |
 | 7 | Geometry part id | `0`, `1`, `2` … | `1` | dialect |
-| 8 | Inline `$$PARAM` | duplicated per layer | removed | dialect |
+| 8 | `$$PARAM` type token | `laser_index,integer,0` | `laser_index,int,0` | blocker |
 | 9 | Line endings | CRLF | LF | dialect |
 | 10 | Archive timestamps | `1980-00-00` (invalid) | valid | dialect |
 
-**Item 8** is only removed after every inline value is checked against the
-parameter file. If any value disagrees, the file is **rejected untouched** —
-two conflicting sources of truth are never silently reconciled.
+**Item 8** — AconitySTUDIO *does* read inline `$$PARAM` lines, so they are kept.
+Per Aconity support: *"the parameter type needs to be changed from integer to
+int"*. Only that type token is rewritten; every parameter name and value is left
+exactly as written, including `laser_index`.
+
+If an inline value disagrees with the parameter file, both are preserved and the
+disagreement is reported for you to resolve — the tool never picks a winner.
 
 **Item 6** loses nothing: part identity in an Aconity ILT comes from the
 modelsection filename, not from the `prtN` label.
 
 ## What the tool never changes
 
-Vector coordinates, record order, polyline direction flags, layer order and
-layer Z heights are copied through **byte-for-byte**. Only the leading part-id
-field, the file header and the parameter file are rewritten.
+Vector coordinates, record order, polyline direction flags, layer order, layer
+Z heights and every inline `$$PARAM` name and value are copied through
+**byte-for-byte**. Only the leading part-id field, the file header, the
+`$$PARAM` type token and the parameter file are rewritten.
 
 After every repair the output is re-read and its full ordered scan-data
 signature compared against the source. **If anything differs, the output is
 deleted and the repair fails.** The result line states exactly what was checked:
 
 ```
-62116 vector records and 1756 layers identical to source; scan order preserved
+62116 vector records and 1756 layers identical to source; scan order preserved;
+3588 inline $$PARAM name/value pairs unchanged
 ```
 
 ## Flagged but not changed

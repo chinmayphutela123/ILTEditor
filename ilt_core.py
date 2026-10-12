@@ -4,20 +4,27 @@ ILT Repair Tool - core engine.
 Converts Dyndrite-exported Aconity .ilt files into the dialect Aconity Studio
 accepts, fixing the "PART META INVALID" import error.
 
-GUARANTEE: scan data is never modified. Vector coordinates, record order,
-polyline direction flags, layer order and layer Z values are passed through
-byte-for-byte. Every repair is verified by re-reading the output and comparing
-the full ordered geometry stream against the input; a mismatch fails the repair.
+GUARANTEE: scan data and process parameters are never modified. Vector
+coordinates, record order, polyline direction flags, layer order, layer Z values
+and every inline $$PARAM name and value are passed through byte-for-byte. Each
+repair is verified by re-reading the output and comparing the full ordered
+geometry stream and the inline parameter stream against the input; a mismatch
+fails the repair.
 
-Reference dialect derived from 60+ working TII builds (B1, B110, B111, ...).
+AconitySTUDIO DOES read inline $$PARAM lines, so they are kept. The only edit
+made to them is a type token Studio's parser rejects ("integer" -> "int"),
+confirmed by Aconity support 2026-10-12.
+
+Reference dialect derived from 400+ ILT files in the TII build archive.
 """
 
+import collections
 import io
 import os
 import re
 import zipfile
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Aconity convention: every working TII build uses this spot size for SS316/IN718.
 DEFAULT_SPOT_DIAMETER = 0.080
@@ -34,7 +41,12 @@ KEY_MAP = [
     ("laser_focus", "FocusShift", "mm"),
 ]
 
-_PARAM_RX = re.compile(r"\$\$PARAM/(\w+),(\w+),([-\d.]+)")
+_PARAM_RX = re.compile(r"\$\$PARAM/(\w+),(\w+),([-\w.]+)")
+
+# Type tokens Dyndrite emits that AconitySTUDIO's parser does not accept,
+# mapped to the token it expects. Confirmed by Aconity support 2026-10-12:
+# "the parameter type needs to be changed from integer to int".
+BAD_PARAM_TYPES = {"integer": "int"}
 _SECTION_RX = re.compile(r"\[(.+)\]$")
 _GEOM_RX = re.compile(r"\$\$(HATCHES|POLYLINE)/\d+,(.*)")
 _LAYER_RX = re.compile(r"\$\$LAYER/([\d.eE+-]+)")
@@ -215,6 +227,7 @@ def analyse(path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False):
         # --- scan the CLI files -----------------------------------------
         units, labels, param_lines = set(), 0, 0
         geom_ids, crlf, layer_first, layer_count = set(), 0, set(), 0
+        bad_types = collections.Counter()
         mismatches = []
         missing_meta = []
 
@@ -236,7 +249,9 @@ def analyse(path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False):
                 layer_first.add(round(float(ls[0]), 5))
             for m in _PARAM_RX.finditer(data):
                 param_lines += 1
-                key, _t, val = m.groups()
+                key, typ, val = m.groups()
+                if typ in BAD_PARAM_TYPES:
+                    bad_types[(key, typ)] += 1
                 declared = meta.get(n, {}).get(key)
                 if declared is None or abs(_num(declared) - float(val)) > 1e-6:
                     mismatches.append((n, key, declared, val))
@@ -250,12 +265,16 @@ def analyse(path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False):
             return rep
 
         if mismatches:
-            rep.error = (
-                "Inline $$PARAM values disagree with the parameter file in %d place(s) "
-                "— refusing to touch this file. First: %s %s declared=%s inline=%s"
-                % (len(mismatches), mismatches[0][0], mismatches[0][1],
-                   mismatches[0][2], mismatches[0][3]))
-            return rep
+            rep.add("review",
+                    "Inline $$PARAM disagrees with the parameter file",
+                    "%d value(s) differ between the inline $$PARAM lines and %s. "
+                    "Both are preserved exactly as they are — the tool does not "
+                    "choose between them — but you should confirm which one Studio "
+                    "applies. First: %s %s declared=%s inline=%s"
+                    % (len(mismatches), meta_name, mismatches[0][0],
+                       mismatches[0][1], mismatches[0][2], mismatches[0][3]),
+                    before="%d disagreement(s)" % len(mismatches),
+                    after="(both kept unchanged)", action="Review only")
 
         bad_units = sorted(u for u in units if u != "1")
         if bad_units:
@@ -281,15 +300,29 @@ def analyse(path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False):
                     before="id " + ", ".join(off[:6]) + ("..." if len(off) > 6 else ""),
                     after="id 1", action="Remap")
 
-        if param_lines:
-            rep.add("dialect", "Laser parameters duplicated inline",
-                    "Aconity reads laser parameters from the parameter file only, "
-                    "never from inline $$PARAM. All %d line(s) were checked against "
-                    "the parameter file and agree exactly, so this removes a "
-                    "redundant copy." % param_lines,
+        rep.stats["param_lines"] = param_lines
+        if bad_types:
+            total = sum(bad_types.values())
+            detail = ", ".join("%s (%s)" % (k, t) for (k, t) in sorted(bad_types))
+            rep.add("blocker",
+                    "$$PARAM type token not understood by Studio",
+                    "Aconity Studio's parser expects the short type name. Per "
+                    "Aconity support: \"the parameter type needs to be changed "
+                    "from integer to int\". Only the type token changes — the "
+                    "parameter name and its value are untouched. Affected: %s."
+                    % detail,
+                    before="$$PARAM/%s,%s,..  (%d line(s))"
+                           % (sorted(bad_types)[0][0], sorted(bad_types)[0][1], total),
+                    after="$$PARAM/%s,%s,.."
+                          % (sorted(bad_types)[0][0],
+                             BAD_PARAM_TYPES[sorted(bad_types)[0][1]]),
+                    action="Rename type")
+        elif param_lines:
+            rep.add("review", "Inline $$PARAM present",
+                    "%d inline $$PARAM line(s). Aconity Studio reads these, so they "
+                    "are kept exactly as written." % param_lines,
                     before="%d $$PARAM lines" % param_lines,
-                    after="(removed; values kept in %s)" % ACONITY_META_NAME,
-                    action="Strip")
+                    after="(unchanged)", action="Keep")
 
         if crlf:
             rep.add("dialect", "Windows line endings",
@@ -363,7 +396,17 @@ def _convert_cli(data, shift):
     body = txt.split("$$GEOMETRYSTART", 1)[1].lstrip("\n")
     out = [ACONITY_HEADER]
     for line in body.split("\n"):
-        if not line or line.startswith("$$PARAM/"):
+        if not line:
+            continue
+        if line.startswith("$$PARAM/"):
+            # Studio reads inline parameters, so the line is kept. Only a type
+            # token Studio does not understand is renamed; name and value stay.
+            m = _PARAM_RX.match(line)
+            if m and m.group(2) in BAD_PARAM_TYPES:
+                out.append("$$PARAM/%s,%s,%s\n"
+                           % (m.group(1), BAD_PARAM_TYPES[m.group(2)], m.group(3)))
+            else:
+                out.append(line + "\n")
             continue
         if line.startswith("$$LAYER/"):
             out.append("$$LAYER/%.5f\n" % (float(line[8:]) + shift))
@@ -382,10 +425,17 @@ def _convert_cli(data, shift):
 
 
 def _geometry_signature(text):
-    """Ordered scan-data fingerprint: records, coordinates and interleaving."""
+    """Ordered fingerprint: geometry records, layers, interleaving, parameters.
+
+    The parameter stream records each $$PARAM as (name, value) with the type
+    token deliberately excluded, since renaming that token is the one edit the
+    repair is allowed to make. Any change to a parameter NAME or VALUE, or to
+    the number or order of the lines, breaks the comparison.
+    """
     return (_GEOM_RX.findall(text),
             [round(float(x), 6) for x in _LAYER_RX.findall(text)],
-            _ORDER_RX.findall(text))
+            _ORDER_RX.findall(text),
+            [(m.group(1), m.group(3)) for m in _PARAM_RX.finditer(text)])
 
 
 def repair(rep, out_path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False,
@@ -465,7 +515,8 @@ def repair(rep, out_path, spot_diameter=DEFAULT_SPOT_DIAMETER, shift_z=False,
 def _verify(sigs, shift):
     total_records = 0
     total_layers = 0
-    for n, ((go, lo, so), (gn, ln, sn)) in sigs.items():
+    total_params = 0
+    for n, ((go, lo, so, po), (gn, ln, sn, pn)) in sigs.items():
         if go != gn:
             return False, "%s: vector data differs" % n
         if so != sn:
@@ -473,11 +524,17 @@ def _verify(sigs, shift):
         expect = [round(v + shift, 6) for v in lo]
         if expect != ln:
             return False, "%s: layer heights differ" % n
+        if po != pn:
+            return False, "%s: inline $$PARAM names or values differ" % n
         total_records += len(gn)
         total_layers += len(ln)
+        total_params += len(pn)
     zmsg = (" (all layers shifted +%.4f mm as requested)" % shift) if shift else ""
+    pmsg = ("; %d inline $$PARAM name/value pairs unchanged" % total_params
+            if total_params else "")
     return True, ("%d vector records and %d layers identical to source; "
-                  "scan order preserved%s" % (total_records, total_layers, zmsg))
+                  "scan order preserved%s%s"
+                  % (total_records, total_layers, pmsg, zmsg))
 
 
 OUT_SUBFOLDER = "ACONITY ready"

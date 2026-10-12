@@ -17,3 +17,6 @@ ACONITY ready/
 .idea/
 Thumbs.db
 desktop.ini
+
+# one-off, part-specific scripts (contain local paths)
+make_downskin_demo.py
